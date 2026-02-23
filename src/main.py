@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from io import BytesIO
 
 import aiohttp
@@ -7,6 +8,12 @@ from pymax import MaxClient, Message
 from pymax.types import FileAttach, PhotoAttach, VideoAttach
 
 from src.config import config
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 chats = config.chat_ids
 chats_telegram = {value: key for key, value in chats.items()}
@@ -25,6 +32,7 @@ async def handle_message(message: Message) -> None:
     try:
         tg_id = chats[message.chat_id]
     except KeyError:
+        logger.debug("Пропуск сообщения из нецелевого чата: chat_id=%s", message.chat_id)
         return
 
     sender = await client.get_user(user_id=message.sender)
@@ -60,9 +68,9 @@ async def handle_message(message: Message) -> None:
                         video_bytes.close()
 
                     except aiohttp.ClientError as e:
-                        print(f"Ошибка при загрузке видео: {e}")
-                    except Exception as e:
-                        print(f"Ошибка при отправке видео: {e}")
+                        logger.error("Ошибка при загрузке видео: %s", e)
+                    except Exception:
+                        logger.exception("Ошибка при отправке видео")
 
             # Проверка на изображение
             elif isinstance(attach, PhotoAttach):
@@ -85,9 +93,9 @@ async def handle_message(message: Message) -> None:
                         photo_bytes.close()
 
                     except aiohttp.ClientError as e:
-                        print(f"Ошибка при загрузке изображения: {e}")
-                    except Exception as e:
-                        print(f"Ошибка при отправке фото: {e}")
+                        logger.error("Ошибка при загрузке изображения: %s", e)
+                    except Exception:
+                        logger.exception("Ошибка при отправке фото")
 
             # Проверка на файл
             elif isinstance(attach, FileAttach):
@@ -117,9 +125,9 @@ async def handle_message(message: Message) -> None:
                         file_bytes.close()
 
                     except aiohttp.ClientError as e:
-                        print(f"Ошибка при загрузке файла: {e}")
-                    except Exception as e:
-                        print(f"Ошибка при отправке файла: {e}")
+                        logger.error("Ошибка при загрузке файла: %s", e)
+                    except Exception:
+                        logger.exception("Ошибка при отправке файла")
     else:
         await telegram_bot.send_message(
             chat_id=tg_id,
@@ -130,7 +138,7 @@ async def handle_message(message: Message) -> None:
 # Обработчик запуска клиента, функция выводит все сообщения из чата "Избранное"
 @client.on_start
 async def handle_start() -> None:
-    print("Клиент запущен")
+    logger.info("Клиент запущен")
 
     # Получение истории сообщений
     history = await client.fetch_history(chat_id=0)
@@ -138,13 +146,17 @@ async def handle_start() -> None:
         for message in history:
             user = await client.get_user(message.sender)
             if user:
-                print(f"{user.names[0].name}: {message.text}")
+                logger.info("%s: %s", user.names[0].name, message.text)
 
 
 # Обработчик сообщений Telegram
 @dp.message()
-async def handle_message(message: types.Message, bot: Bot) -> None:
-    max_id = chats_telegram[message.chat.id]
+async def handle_telegram_message(message: types.Message, bot: Bot) -> None:
+    max_id = chats_telegram.get(message.chat.id)
+    if max_id is None:
+        logger.warning("Пропуск сообщения из нецелевого Telegram-чата: chat_id=%s", message.chat.id)
+        return
+
     await client.send_message(chat_id=max_id, text=f"{message.from_user.first_name}: {message.text}", notify=True)
 
 
@@ -164,4 +176,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Программа остановлена пользователем.")
+        logger.info("Программа остановлена пользователем.")
