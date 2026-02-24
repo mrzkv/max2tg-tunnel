@@ -1,7 +1,5 @@
 import asyncio
 import logging
-from io import BytesIO
-
 import aiohttp
 from aiogram import Bot, Dispatcher, types
 from pymax import MaxClient, Message
@@ -15,10 +13,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-chats = config.chat_ids
-chats_telegram = {value: key for key, value in chats.items()}
 
-# Инициализация клиента MAX
+# Инициализация клиента MAX (последняя версия pymax)
 client = MaxClient(phone=config.max_phone_number, work_dir="cache", reconnect=True)
 
 # Инициализация TG-бота
@@ -26,154 +22,105 @@ telegram_bot = Bot(token=config.tg_bot_token)
 dp = Dispatcher()
 
 
-# Обработчик входящих сообщений MAX
-@client.on_message()
-async def handle_message(message: Message) -> None:
-    try:
-        tg_id = chats[message.chat_id]
-    except KeyError:
-        logger.debug("Пропуск сообщения из нецелевого чата: chat_id=%s", message.chat_id)
-        return
+async def _download_to_buffer(url: str, fallback_name: str) -> types.BufferedInputFile:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            response.raise_for_status()
+            content = await response.read()
+            file_name = response.headers.get("X-File-Name") or fallback_name
+            return types.BufferedInputFile(content, filename=file_name)
 
+
+async def _build_sender_prefix(message: Message) -> str:
     sender = await client.get_user(user_id=message.sender)
+    sender_name = sender.names[0].name if sender and sender.names else "Unknown"
+    return f"{sender_name} [chat_id={message.chat_id}]"
 
-    if message.attaches:
+
+@client.on_message()
+async def forward_max_message_to_telegram(message: Message) -> None:
+    """Форвардит все входящие сообщения MAX в Telegram конкретному пользователю."""
+    sender_prefix = await _build_sender_prefix(message)
+    message_text = message.text or ""
+
+    try:
+        if not message.attaches:
+            text = f"{sender_prefix}: {message_text}" if message_text else sender_prefix
+            await telegram_bot.send_message(chat_id=config.tg_target_user_id, text=text)
+            return
+
         for attach in message.attaches:
+            caption = f"{sender_prefix}: {message_text}" if message_text else sender_prefix
 
-            # Проверка на видео
-            if isinstance(attach, VideoAttach):
-                async with aiohttp.ClientSession() as session:
-                    try:
-                        # Получаем видео по айди
-                        video = await client.get_video_by_id(
-                            chat_id=message.chat_id,
-                            message_id=message.id,
-                            video_id=attach.video_id,
-                        )
+            if isinstance(attach, PhotoAttach):
+                photo = await _download_to_buffer(attach.base_url, fallback_name="photo.jpg")
+                await telegram_bot.send_photo(
+                    chat_id=config.tg_target_user_id,
+                    photo=photo,
+                    caption=caption,
+                )
 
-                        # Загружаем видео по URL
-                        async with session.get(video.url) as response:
-                            response.raise_for_status()  # Проверка на ошибки HTTP
-                            video_bytes = BytesIO(await response.read())
-                            video_bytes.name = response.headers.get("X-File-Name")
+            elif isinstance(attach, VideoAttach):
+                video_data = await client.get_video_by_id(
+                    chat_id=message.chat_id,
+                    message_id=message.id,
+                    video_id=attach.video_id,
+                )
+                video = await _download_to_buffer(video_data.url, fallback_name="video.mp4")
+                await telegram_bot.send_video(
+                    chat_id=config.tg_target_user_id,
+                    video=video,
+                    caption=caption,
+                )
 
-                        # Отправляем видео через телеграм бота
-                        await telegram_bot.send_video(
-                            chat_id=tg_id,
-                            caption=f"{sender.names[0].name}: {message.text}",
-                            video=types.BufferedInputFile(video_bytes.getvalue(), filename=video_bytes.name),
-                        )
-
-                        # Очищаем память
-                        video_bytes.close()
-
-                    except aiohttp.ClientError as e:
-                        logger.error("Ошибка при загрузке видео: %s", e)
-                    except Exception:
-                        logger.exception("Ошибка при отправке видео")
-
-            # Проверка на изображение
-            elif isinstance(attach, PhotoAttach):
-                async with aiohttp.ClientSession() as session:
-                    try:
-                        # Загружаем изображение по URL
-                        async with session.get(attach.base_url) as response:
-                            response.raise_for_status()  # Проверка на ошибки HTTP
-                            photo_bytes = BytesIO(await response.read())
-                            photo_bytes.name = response.headers.get("X-File-Name")
-
-                        # Отправляем фото через телеграм бота
-                        await telegram_bot.send_photo(
-                            chat_id=tg_id,
-                            caption=f"{sender.names[0].name}: {message.text}",
-                            photo=types.BufferedInputFile(photo_bytes.getvalue(), filename=photo_bytes.name),
-                        )
-
-                        # Очищаем память
-                        photo_bytes.close()
-
-                    except aiohttp.ClientError as e:
-                        logger.error("Ошибка при загрузке изображения: %s", e)
-                    except Exception:
-                        logger.exception("Ошибка при отправке фото")
-
-            # Проверка на файл
             elif isinstance(attach, FileAttach):
-                async with aiohttp.ClientSession() as session:
-                    try:
-                        # Получаем файл по айди
-                        file = await client.get_file_by_id(
-                            chat_id=message.chat_id,
-                            message_id=message.id,
-                            file_id=attach.file_id,
-                        )
+                file_data = await client.get_file_by_id(
+                    chat_id=message.chat_id,
+                    message_id=message.id,
+                    file_id=attach.file_id,
+                )
+                document = await _download_to_buffer(file_data.url, fallback_name="file.bin")
+                await telegram_bot.send_document(
+                    chat_id=config.tg_target_user_id,
+                    document=document,
+                    caption=caption,
+                )
 
-                        # Загружаем файл по URL
-                        async with session.get(file.url) as response:
-                            response.raise_for_status()  # Проверка на ошибки HTTP
-                            file_bytes = BytesIO(await response.read())
-                            file_bytes.name = response.headers.get("X-File-Name")
+            else:
+                await telegram_bot.send_message(
+                    chat_id=config.tg_target_user_id,
+                    text=f"{caption}\n[Unsupported attachment type: {type(attach).__name__}]",
+                )
 
-                        # Отправляем файл через телеграм бота
-                        await telegram_bot.send_document(
-                            chat_id=tg_id,
-                            caption=f"{sender.names[0].name}: {message.text}",
-                            document=types.BufferedInputFile(file_bytes.getvalue(), filename=file_bytes.name),
-                        )
-
-                        # Очищаем память
-                        file_bytes.close()
-
-                    except aiohttp.ClientError as e:
-                        logger.error("Ошибка при загрузке файла: %s", e)
-                    except Exception:
-                        logger.exception("Ошибка при отправке файла")
-    else:
-        await telegram_bot.send_message(
-            chat_id=tg_id,
-            text=f"{sender.names[0].name}: {message.text}",
-        )
+    except aiohttp.ClientError as error:
+        logger.error("Ошибка загрузки вложения: %s", error)
+    except Exception:
+        logger.exception("Ошибка при форвардинге сообщения из MAX в Telegram")
 
 
-# Обработчик запуска клиента, функция выводит все сообщения из чата "Избранное"
 @client.on_start
 async def handle_start() -> None:
-    logger.info("Клиент запущен")
-
-    # Получение истории сообщений
-    history = await client.fetch_history(chat_id=0)
-    if history:
-        for message in history:
-            user = await client.get_user(message.sender)
-            if user:
-                logger.info("%s: %s", user.names[0].name, message.text)
+    logger.info("MAX клиент запущен. Форвардинг в TG user_id=%s", config.tg_target_user_id)
 
 
-# Обработчик сообщений Telegram
 @dp.message()
-async def handle_telegram_message(message: types.Message, bot: Bot) -> None:
-    max_id = chats_telegram.get(message.chat.id)
-    if max_id is None:
-        logger.warning("Пропуск сообщения из нецелевого Telegram-чата: chat_id=%s", message.chat.id)
-        return
-
-    await client.send_message(chat_id=max_id, text=f"{message.from_user.first_name}: {message.text}", notify=True)
+async def ignore_telegram_messages(message: types.Message) -> None:
+    """Бот работает в режиме MAX -> Telegram, входящие из Telegram игнорируются."""
+    logger.debug("Игнор Telegram-сообщения chat_id=%s", message.chat.id)
 
 
-# Раннер ботов
 async def main() -> None:
-    # TG-бот в фоне
-    telegram_bot_task = asyncio.create_task(dp.start_polling(telegram_bot))
+    telegram_polling = asyncio.create_task(dp.start_polling(telegram_bot))
 
     try:
         await client.start()
     finally:
         await client.close()
-        telegram_bot_task.cancel()
+        telegram_polling.cancel()
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Программа остановлена пользователем.")
+        logger.info("Программа остановлена пользователем")

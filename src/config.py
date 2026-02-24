@@ -10,18 +10,26 @@ load_dotenv()
 class Settings:
     max_phone_number: str
     tg_bot_token: str
-    chat_ids: dict[str, str]
+    tg_target_user_id: int
+
+
+def _require_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"Environment variable {name} is required")
+    return value
 
 
 def get_config() -> Settings:
-    max_phone_number = os.getenv("MAX_PHONE_NUMBER")
-    tg_bot_token = os.getenv("TG_BOT_TOKEN")
-    raw = os.getenv("CHAT_IDS")
-    chat_ids = dict(
-            pair.split(":")
-            for pair in raw.split(",")
-            if pair
-        )
-    return Settings(max_phone_number, tg_bot_token, chat_ids)
+    max_phone_number = _require_env("MAX_PHONE_NUMBER")
+    tg_bot_token = _require_env("TG_BOT_TOKEN")
+    tg_target_user_id = int(_require_env("TG_TARGET_USER_ID"))
+
+    return Settings(
+        max_phone_number=max_phone_number,
+        tg_bot_token=tg_bot_token,
+        tg_target_user_id=tg_target_user_id,
+    )
+
 
 config = get_config()
